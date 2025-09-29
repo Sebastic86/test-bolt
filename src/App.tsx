@@ -117,6 +117,11 @@ function App() {
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [refreshHistoryTrigger, setRefreshHistoryTrigger] = useState<number>(0);
 
+  // All Matches State for Overall Standings
+  const [allMatches, setAllMatches] = useState<MatchHistoryItem[]>([]);
+  const [loadingAllMatches, setLoadingAllMatches] = useState<boolean>(false);
+  const [allMatchesError, setAllMatchesError] = useState<string | null>(null);
+
 
   // Filtered teams based on rating and nation settings
   const filteredTeams = useMemo(() => {
@@ -202,6 +207,73 @@ function App() {
     }
   }, [allTeams, allPlayers]);
 
+  // Fetch All Matches for Overall Standings
+  const fetchAllMatches = useCallback(async () => {
+    setLoadingAllMatches(true);
+    setAllMatchesError(null);
+    console.log("[App] Fetching all matches...");
+
+    try {
+      const { data: matchesData, error: matchesError } = await supabase
+        .from('matches')
+        .select('*')
+        .order('played_at', { ascending: false });
+
+      if (matchesError) throw matchesError;
+      if (!matchesData) {
+          setAllMatches([]);
+          setLoadingAllMatches(false);
+          return;
+      }
+
+      const matchIds = matchesData.map(m => m.id);
+      let matchPlayersData: MatchPlayer[] = [];
+      if (matchIds.length > 0) {
+          const { data: mpData, error: mpError } = await supabase
+              .from('match_players')
+              .select('*')
+              .in('match_id', matchIds);
+          if (mpError) throw mpError;
+          matchPlayersData = mpData || [];
+      }
+
+      const playerMap = new Map(allPlayers.map(p => [p.id, p]));
+      const teamMap = new Map(allTeams.map(t => [t.id, t]));
+
+      const combinedMatches: MatchHistoryItem[] = matchesData.map(match => {
+        const team1 = teamMap.get(match.team1_id);
+        const team2 = teamMap.get(match.team2_id);
+        const playersInMatch = matchPlayersData.filter(mp => mp.match_id === match.id);
+
+        return {
+          ...match,
+          team1_name: team1?.name ?? 'Unknown Team',
+          team1_logoUrl: team1?.logoUrl ?? '',
+          team2_name: team2?.name ?? 'Unknown Team',
+          team2_logoUrl: team2?.logoUrl ?? '',
+          team1_players: playersInMatch
+            .filter(mp => mp.team_number === 1)
+            .map(mp => playerMap.get(mp.player_id))
+            .filter((p): p is Player => p !== undefined),
+          team2_players: playersInMatch
+            .filter(mp => mp.team_number === 2)
+            .map(mp => playerMap.get(mp.player_id))
+            .filter((p): p is Player => p !== undefined),
+        };
+      });
+
+      console.log("[App] All matches fetched:", combinedMatches);
+      setAllMatches(combinedMatches);
+
+    } catch (err: any) {
+      console.error('[App] Error fetching all matches:', err);
+      setAllMatchesError('Failed to load all matches.');
+      setAllMatches([]);
+    } finally {
+      setLoadingAllMatches(false);
+    }
+  }, [allTeams, allPlayers]);
+
   // Fetch initial data (teams, players)
   useEffect(() => {
     setLoading(true);
@@ -233,8 +305,9 @@ function App() {
   useEffect(() => {
     if (allTeams.length > 0 && allPlayers.length > 0) {
         fetchTodaysMatches();
+        fetchAllMatches();
     }
-  }, [allTeams, allPlayers, refreshHistoryTrigger, fetchTodaysMatches]);
+  }, [allTeams, allPlayers, refreshHistoryTrigger, fetchTodaysMatches, fetchAllMatches]);
 
 
   // Effect to set initial match or update when filters/teams change
@@ -467,6 +540,86 @@ function App() {
 
   }, [matchesToday, allPlayers, allTeams]);
 
+  // Calculate Overall Player Standings (All Matches)
+  const overallPlayerStandings = useMemo(() => {
+    console.log("[App] Calculating overall player standings...");
+    const standingsMap = new Map<string, PlayerStanding>();
+    const teamMap = new Map(allTeams.map(t => [t.id, t]));
+
+    allPlayers.forEach(player => {
+      standingsMap.set(player.id, {
+        playerId: player.id,
+        playerName: player.name,
+        points: 0,
+        goalsFor: 0,
+        goalsAgainst: 0,
+        goalDifference: 0,
+        totalOverallRating: 0,
+      });
+    });
+
+    allMatches.forEach(match => {
+      const team1 = teamMap.get(match.team1_id);
+      const team2 = teamMap.get(match.team2_id);
+
+      const hasScores = match.team1_score !== null && match.team2_score !== null;
+      let winnerTeamNumber: 1 | 2 | null = null;
+      if (hasScores) {
+        const score1 = match.team1_score!;
+        const score2 = match.team2_score!;
+        if (score1 > score2) winnerTeamNumber = 1;
+        else if (score2 > score1) winnerTeamNumber = 2;
+      }
+
+      match.team1_players.forEach(player => {
+        const standing = standingsMap.get(player.id);
+        if (standing) {
+          if (hasScores) {
+            standing.goalsFor += match.team1_score!;
+            standing.goalsAgainst += match.team2_score!;
+            if (winnerTeamNumber === 1) {
+              standing.points += 1;
+            }
+          }
+          if (team1) {
+            standing.totalOverallRating += team1.overallRating;
+          }
+        }
+      });
+
+      match.team2_players.forEach(player => {
+        const standing = standingsMap.get(player.id);
+        if (standing) {
+          if (hasScores) {
+            standing.goalsFor += match.team2_score!;
+            standing.goalsAgainst += match.team1_score!;
+            if (winnerTeamNumber === 2) {
+              standing.points += 1;
+            }
+          }
+          if (team2) {
+            standing.totalOverallRating += team2.overallRating;
+          }
+        }
+      });
+    });
+
+    const standingsArray = Array.from(standingsMap.values()).map(s => ({
+        ...s,
+        goalDifference: s.goalsFor - s.goalsAgainst
+    }));
+
+    standingsArray.sort((a, b) => {
+      if (b.points !== a.points) return b.points - a.points;
+      if (b.goalDifference !== a.goalDifference) return b.goalDifference - a.goalDifference;
+      return b.goalsFor - a.goalsFor;
+    });
+
+    console.log("[App] Overall player standings calculated:", standingsArray);
+    return standingsArray;
+
+  }, [allMatches, allPlayers, allTeams]);
+
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-100 via-purple-100 to-pink-100 p-4 flex flex-col items-center">
@@ -530,7 +683,12 @@ function App() {
 
        {/* Player Standings */}
        {!loading && !error && (
-            <PlayerStandings standings={playerStandings} loading={loadingHistory} error={historyError} />
+            <PlayerStandings standings={playerStandings} loading={loadingHistory} error={historyError} title="Player Standings (Today)" />
+       )}
+
+       {/* Overall Player Standings */}
+       {!loading && !error && (
+            <PlayerStandings standings={overallPlayerStandings} loading={loadingAllMatches} error={allMatchesError} title="Player Standings (Overall)" />
        )}
 
       {/* Modals */}
