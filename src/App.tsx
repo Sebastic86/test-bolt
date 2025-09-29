@@ -624,7 +624,7 @@ function App() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-100 via-purple-100 to-pink-100 p-4 flex flex-col items-center">
       <h1 className="text-3xl md:text-4xl font-bold text-gray-800 mt-8 mb-6 text-center">
-        EA FC Random Match Generator
+        EA FC Random Match Generator 2026
       </h1>
 
       {loading && <p className="text-gray-600">Loading initial data...</p>}
